@@ -1,18 +1,22 @@
 import React from 'react'
-import { DocsThemeConfig } from 'nextra-theme-docs'
+import { NextraBlogTheme } from 'nextra-theme-blog'
 
-const config: DocsThemeConfig = {
-  logo: <span>My Project</span>,
-  project: {
-    link: 'https://github.com/shuding/nextra-docs-template',
-  },
-  chat: {
-    link: 'https://discord.com',
-  },
-  docsRepositoryBase: 'https://github.com/shuding/nextra-docs-template',
-  footer: {
-    text: 'Nextra Docs Template',
-  },
+const config: NextraBlogTheme ={
+    footer: <small>2023 © Grep.ing</small>,
+    head: ({ title, meta }) => (
+      <>
+        {meta.description && (
+          <meta name="description" content={meta.description} />
+        )}
+        <meta property="og:title" content={meta.title} />
+        {meta.tag && <meta name="keywords" content={meta.tag} />}
+        {meta.author && <meta name="author" content={meta.author} />}
+      </>
+    ),
+    readMore: '📖 Read More →',
+    postFooter: null,
+    darkMode: true,
+    titleSuffix:' - Grep.ing'
 }
 
 export default config
