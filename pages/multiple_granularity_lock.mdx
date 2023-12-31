@@ -1,0 +1,175 @@
+---
+title: Hierarchical locking 层锁🔒（上）
+date: 2022/12/20
+description: 梦回 1970
+tag: Database, Lock
+author: Weny
+---
+
+## 碎碎念
+这篇论文看完很久了（~~提笔的时候发现已经忘得差不多了😇~~），一直想去实现一个对应的 Rust 版本；但是最近一直在忙实习和学校的事情，也就一直拖着没动... （我的美签也快拖延了一个多月了🥹
+~~总算是下决心 Push 自己睡前挤一个小时去写(大雾~~
+
+## 开始之前
+
+这篇发表于 1975 年的论文，全名叫 [「Granularity of Locks and Degrees of Consistency in a Shared Data Base」](https://dl.acm.org/doi/pdf/10.1145/1282480.1282513)，
+但是本文我们只会涉及到前半部分，即 Hierarchical locking。
+
+
+1970 年代，提出关系模型的论文才刚被发表（A Relational Model of Data for Large Shared Data Banks），Navigational Databases 仍是这个时代数据库的主旋律。
+这篇文章作者是来自于 IBM System R 团队，他们同时期发表了一系列的文章（例如，The Notions of Consistency and Predicate Locks in a Database System；
+印象里近10年内发表的来自慕尼黑工业大学的论文对其有引用。另外说一句，Predicate Locks 其实并没有被时代所淘汰，Rust Moka 库就有变种的应用。）
+奠定了今天的关系型数据库中的非常多概念，例如事务，一致性等概念。
+
+> In 1973 when the System R project was getting started at IBM, 
+> the research team released a series of papers describing the system they were building. 
+> Two scientists at Berkeley, Michael Stonebraker and Eugene Wong, became interested in the concept after reading the papers, 
+> and started a relational database research project of their own
+
+https://www.wikiwand.com/en/Ingres_(database)
+
+这一系列论文拉开了关系型数据库的序幕。伯克利（UC Berkeley）的 Ingres 也是受深这些论文的启发，
+Ingres 发展到今天便是大家所熟知的 PostgreSQL （没错 PostgreSQL 名字由来便是 post-Ingres）。
+
+## Granularity of Locks
+
+选择锁的颗粒度（lockable units）通常代表着在 concurrency 和 overhead 之前做取舍。
+当颗粒度小的时候，系统的并发（concurrency）可以增加；然而，过小的颗粒度在
+访问大量数据时，系统的开销（overhead）会急剧增加（例如，可以预见内存会需要维护大量的锁）。
+
+这篇论文提出了一种允许多种颗粒度锁共存的机制，即 Hierarchical Locks。
+
+## Hierarchical Locks
+
+```
+DATA BASE
+    │
+    │
+  AREAS
+    │
+    │
+  FILES
+    │
+    │
+ RECORDS
+```
+Figure 1. A sample lock hierarchy. 
+
+
+论文给出一个示例，其层次结构如图，每层（Hierarchy）给到一个节点（Node）；
+例如 `DATA BASE` 节点后面（下面）包含名为 `AREAS` 后代（descendants），
+以及 `FILES` 则包含名为 `RECORDS` 后代，并且每层都可以被锁住🔒。
+
+首先来介绍两种大家比较熟悉的访问模式，独占访问(Exclusive access (**X**))和共享访问(Shared access (**S**))；
+当一个节点被授予其中之一的访问权后，则该节点的子树(Subtree)也将被隐式地该种访问权。
+
+具体的定义如下：
+- 如有一个请求者（requestor）尝试获取某节点的独占访问权，且并被成功授予独占访问权（即独占锁定🔒），
+则意味着请求者被隐式地（implicitly）授予该节点所有后代节点的独占访问权。
+- 如有一个请求者（requestor）尝试获取某节点的共享访问权，且并被成功授予共享访问权（即共享锁定🔒），
+则意味着请求者被隐式地（implicitly）授予该节点所有后代节点的共享访问权。
+
+然而独占或共享访问只能锁住整颗树，不能对其子树进行锁定。
+
+层锁的设计目标是：找到一种方式隐式锁定整颗子树(subtree)（与之对比，显式锁定子树则是叶到根的顺序获取锁）。对根为 R 的子树上独占或共享锁定，
+很重要的一点是要防止 R 的祖先被独占或共享锁定（因为此操作会对 R 及其后代节点进行隐式锁定）。
+所以引入一个新的访问模式：意向模式(Intention mode, (**I**))。
+
+意向模式用于标记（锁定）**所有要以共享或独占模式锁定的节点的祖先**； 
+这些标记表明锁定是在“更精细”的级别（即后代节点）上完成的，并防止对祖先进行隐式或显式的独占或共享锁定。
+
+也就是说，层锁对根为 R 的子树进行独占或者共享锁定时，会先对 R 的祖先进行意向独占或者共享锁定。
+以 Figure 1 为例，为了对 `FILE` 进行锁定，则需要先意向锁定 `DATA BASE`，随后意向锁定 `AREAS`，
+最后是独占或者共享锁定 `FILE` 本身。
+
+### Access mode and compatibility
+
+模式之间的兼容性来源自它们的语义。
+
+- 共享锁定的语义：允许请求者和其他事务读，但是不允许修改相应的资源。
+- 独占锁定的语义：允许读与修改，不允许其他事务读或修改锁定的资源。
+
+显而易见，根据语义的定义：多个共享请求可以同时被授予（兼容的），而独占请求与任何其他请求都不兼容。
+
+根据定义「防止对祖先进行隐式或显式的独占或共享锁定」，意向模式（Intention mode）与独占和共享模式互不兼容。
+但是意向模式是与自身兼容的。例如，两个事务同时对某个节点进行意向锁定，并显式锁定该节点的后代，
+使其后代处于 X、S 或 I 模式，那么后代要么彼此兼容，要么根据其请求在更精细的级别上进行调度。
+
+意向模式被细分为
+- Intention share mode(IS)：意向共享模式
+- Intention exclusive mode(IX)：意向独占模式
+- Share and intention exclusive mode (SIX)：共享的意向独占模式
+
+前两个的引入显而易见，主要是用于区分读写增大并发的。
+第三个则是为以下场景设计的：当事务尝试读取整颗子树并只对其中少数节点进行更新。
+对于这个场景通常有两种做法：
+- (a)对子树独占锁定(X)。
+- (b)对子树意向独占锁定(IX)，并继续对子树的后代做进一步锁定。
+然而 (a) 的做法并发较低；(b) 的做法锁定的开销较大。
+
+对于这种场景，共享的意向独占模式(SIX)更加合适，：
+- 允许对子树共享访问；意味着可以读取读取整颗子树，不需要对子树后代进一步锁定。
+- 允许对子树意向独占访问；意味着允许对子树的后代进行独占锁定，或者对介入节点*进行意向独占(IX)或者共享的意向独占(SIX)锁定。
+
+*: 例如对子树的某个子树进行锁定，其某个子树的根节点为介入节点
+
+共享的意向独占(SIX)是与意向共享(IS)模式是兼容的。意向共享(IS)模式会显式的用意向共享(IS)或者共享(S)模式锁定后代（与意向独占(IX)或独占(X)模式是互斥的）。
+
+但是，共享的意向独占(SIX)模式与独占(IX)、共享(S)、共享的意向独占(SIX)或 独占(X)模式请求不兼容。
+
+|     | IS | IX | S | SIX | X |
+|:---:|:--:|:--:|:-:|:---:|:-:|
+|  IS |  Y |  Y | Y |  Y  | N |
+|  IX |  Y |  Y | N |  N  | N |
+|  S  |  Y |  N | Y |  N  | N |
+| SIX |  Y |  N | N |  N  | N |
+|  X  |  N |  N | N |  N  | N |
+
+S：对节点共享访问，意味着对节点后代隐式共享锁定(S)。
+
+X：对节点独占访问，意味着对节点后代隐式独占锁定(S)。
+
+IS：对节点意向共享访问，允许请求者对节点的后代进行共享(S)或意向共享锁定(IS)（即，不对节点后代隐式锁定）。
+
+IX：对节点意向独占访问，允许请求者对节点的后代进行独占(X)或意向独占锁定(IX)（即，不对节点后代隐式锁定）。
+
+SIX：对节点后代隐式共享锁定(S)，并允许请求者显式对节点后代独占(X)共享的意向独占访问(SIX)或意向独占(IX)锁定。
+
+```
+         X
+         │
+         │
+        SIX
+         │
+         │
+ ┌───────┴───────┐
+ │               │
+ S               IX
+ │               │
+ └───────┬───────┘
+         │
+         │
+         IS
+```
+Figure 2. The partial ordering of modes by their privileges. 
+
+IS 模式访问权限最低，其权限比 IX 或 S 模式更低。 
+
+IX 模式允许后代节点上设置 IS、IX、S、SIX 模式锁定。
+
+X 模式允许在后代节点上设置 S 模式锁。
+
+SIX 模式具有 S 和 IX 的权限。
+
+X 模式是最高权限的模式，允许读和修改所有后代节点。
+
+由于 IX 和 S 不可比较，所以并不是全序的。
+
+### Rules for requesting nodes
+
+显而易见，层锁工作的前提是：所有请求需要从根到叶的顺序获取锁。且叶节点不能获取意向锁（因为没有后代节点）。
+
+- (a) 在节点上获取 S 或 IS 锁之前，必须先获取节点的祖先节点的 IX 或 IS 锁定。
+- (b) 在节点上获取 X、SIX 或 IX 锁之前，必须先获取节点的祖先节点的 SIX 或 IX 锁定。
+- (c) 锁应该在事务结束时释放，或者以叶到根的顺序释放。
+- (d) (在 DAG 中)尝试移动节点时候，必须获取新老位置的 X 锁定。
